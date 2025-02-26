@@ -11,7 +11,7 @@ var _ http.RoundTripper = (*harRoundTripper)(nil)
 
 type harRoundTripper struct {
 	base   http.RoundTripper
-	writer *HarWriter
+	writer *EntryWriter
 }
 
 func (t *harRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {

@@ -1,83 +1,47 @@
 package harwriter
 
 import (
+	"bufio"
 	"encoding/json"
-	"io/fs"
+	"fmt"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"time"
 
 	"github.com/oliverroer/go-har"
 )
 
-type HarWriter struct {
-	file       *os.File
-	encoder    *json.Encoder
-	entryCount int
+type EntryWriter struct {
+	name    string
+	file    *os.File
+	encoder *json.Encoder
 }
-
-const beginJson = `{
-  "log": {
-    "version": "1.2",
-    "creator": {
-      "name": "github.com/oliverroer/go-har",
-      "version": "0.1.0"
-    },
-    "entries": [`
-
-const endJson = `    ]
-  }
-}
-`
-
-const INDENT_1 = "  "
-const INDENT_2 = INDENT_1 + INDENT_1
-const INDENT_3 = INDENT_1 + INDENT_2
-const NEWLINE = "\n"
 
 func DefaultName() string {
 	now := time.Now().UTC()
 	const format = "2006-01-02_15-04-05.000000000"
 	name := now.Format(format)
-	return name + ".har"
+	return name
 }
 
-func OpenDefault(dir string) (*HarWriter, error) {
-	perm := fs.FileMode(0750)
-	err := os.MkdirAll(dir, perm)
-	if err != nil {
-		return nil, err
-	}
-
-	name := path.Join(dir, DefaultName())
-	return Open(name)
-}
-
-func Open(name string) (*HarWriter, error) {
+func Open(name string) (*EntryWriter, error) {
 	cleaned := filepath.Clean(name)
 	file, err := os.Create(cleaned)
 	if err != nil {
 		return nil, err
 	}
 
-	writer := HarWriter{
-		file:       file,
-		encoder:    json.NewEncoder(file),
-		entryCount: 0,
-	}
-	writer.encoder.SetIndent(INDENT_3, INDENT_1)
-
-	_, err = file.WriteString(beginJson)
-	if err != nil {
-		return nil, err
+	writer := EntryWriter{
+		name:    name,
+		file:    file,
+		encoder: json.NewEncoder(file),
 	}
 
 	return &writer, nil
 }
 
-func (w *HarWriter) WriteEntry(
+func (w *EntryWriter) WriteEntry(
 	request har.Request,
 	response har.Response,
 	startedAt time.Time,
@@ -90,46 +54,84 @@ func (w *HarWriter) WriteEntry(
 		Response:        response,
 	}
 
-	if w.entryCount > 0 {
-		// previous encode call inserted a premature newline
-		// so we seek back and replace it with a comma
-		_, err := w.file.Seek(-1, 1)
-		if err != nil {
-			return err
-		}
-		_, err = w.file.WriteString(",")
-		if err != nil {
-			return err
-		}
-	}
-	_, err := w.file.WriteString(NEWLINE + INDENT_3)
+	err := w.encoder.Encode(entry)
 	if err != nil {
 		return err
 	}
-
-	err = w.encoder.Encode(entry)
-	if err != nil {
-		return err
-	}
-	w.entryCount += 1
 
 	_ = w.file.Sync()
 
 	return nil
 }
 
-func (w *HarWriter) Close() error {
-	_, err := w.file.WriteString(endJson)
-	if err != nil {
-		return err
-	}
-
+func (w *EntryWriter) Close() error {
 	return w.file.Close()
 }
 
-func (w *HarWriter) RoundTripper(base http.RoundTripper) http.RoundTripper {
+func (w *EntryWriter) RoundTripper(base http.RoundTripper) http.RoundTripper {
 	return &harRoundTripper{
 		base:   base,
 		writer: w,
 	}
+}
+
+const harBegin = `{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "github.com/oliverroer/go-har",
+      "version": "0.1.1"
+    },
+    "entries": [`
+
+const harEnd = `
+    ]
+  }
+}
+`
+
+func EntriesToHar(harFile string, entryFiles ...string) error {
+	harFile = filepath.Clean(harFile)
+	har, err := os.Create(harFile)
+	if err != nil {
+		return err
+	}
+
+	_, err = har.WriteString(harBegin)
+	if err != nil {
+		return err
+	}
+
+	for _, entryFile := range entryFiles {
+		entryFile = filepath.Clean(entryFile)
+		file, err := os.Open(entryFile)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			str := fmt.Sprintf("\n      %s,", line)
+			_, err := har.WriteString(str)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// step one byte back to discard the last trailing comma
+	_, err = har.Seek(-1, 1)
+	if err != nil {
+		return err
+	}
+
+	_, err = har.WriteString(harEnd)
+	if err != nil {
+		return err
+	}
+
+	return har.Close()
 }
